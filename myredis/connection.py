@@ -262,7 +262,7 @@ class PythonParser(BaseParser):
         except Exception:
             pass
 
-    def on_connect(self, connection):
+    async def on_connect(self, connection):
         "Called when the socket connects"
         self._sock = connection._sock
         self._buffer = SocketBuffer(self._sock, self.socket_read_size)
@@ -279,7 +279,7 @@ class PythonParser(BaseParser):
     def can_read(self):
         return self._buffer and bool(self._buffer.length)
 
-    def read_response(self):
+    async def read_response(self):
         response = self._buffer.readline()
         if not response:
             raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
@@ -342,7 +342,7 @@ class HiredisParser(BaseParser):
         except Exception:
             pass
 
-    def on_connect(self, connection):
+    async def on_connect(self, connection):
         self._sock = connection._sock
         kwargs = {
             'protocolError': InvalidResponse,
@@ -358,7 +358,7 @@ class HiredisParser(BaseParser):
         self._reader = hiredis.Reader(**kwargs)
         self._next_response = False
 
-    def on_disconnect(self):
+    async def on_disconnect(self):
         self._sock = None
         self._reader = None
         self._next_response = False
@@ -371,7 +371,7 @@ class HiredisParser(BaseParser):
             self._next_response = self._reader.gets()
         return self._next_response is not False
 
-    def read_response(self):
+    async def read_response(self):
         if not self._reader:
             raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
 
@@ -471,12 +471,12 @@ class Connection(object):
     def clear_connect_callbacks(self):
         self._connect_callbacks = []
 
-    def connect(self):
+    async def connect(self):
         "Connects to the Redis server if not already connected"
         if self._sock:
             return
         try:
-            sock = self._connect()
+            sock = await self._connect()
         except socket.timeout:
             raise TimeoutError("Timeout connecting to server")
         except socket.error:
@@ -486,10 +486,10 @@ class Connection(object):
         self._sock = sock
         self._selector = DefaultSelector(sock)
         try:
-            self.on_connect()
+            await self.on_connect()
         except RedisError:
             # clean up after any error in on_connect
-            self.disconnect()
+            await self.disconnect()
             raise
 
         # run any user callbacks. right now the only internal callback
@@ -497,7 +497,7 @@ class Connection(object):
         for callback in self._connect_callbacks:
             callback(self)
 
-    def _connect(self):
+    async def _connect(self):
         "Create a TCP socket connection"
         # we want to mimic what socket.create_connection does to support
         # ipv4/ipv6, but we want to set options prior to calling
@@ -547,19 +547,19 @@ class Connection(object):
             return "Error %s connecting to %s:%s. %s." % \
                 (exception.args[0], self.host, self.port, exception.args[1])
 
-    def on_connect(self):
+    async def on_connect(self):
         "Initialize the connection, authenticate and select a database"
-        self._parser.on_connect(self)
+        await self._parser.on_connect(self)
 
         # if a password is specified, authenticate
         if self.password:
-            self.send_command('AUTH', self.password)
+            await self.send_command('AUTH', self.password)
             if nativestr(self.read_response()) != 'OK':
                 raise AuthenticationError('Invalid Password')
 
         # if a database is specified, switch to it
         if self.db:
-            self.send_command('SELECT', self.db)
+            await self.send_command('SELECT', self.db)
             if nativestr(self.read_response()) != 'OK':
                 raise ConnectionError('Invalid Database')
 
@@ -579,10 +579,10 @@ class Connection(object):
             pass
         self._sock = None
 
-    def send_packed_command(self, command):
+    async def send_packed_command(self, command):
         "Send an already packed command to the Redis server"
         if not self._sock:
-            self.connect()
+            await self.connect()
         try:
             if isinstance(command, str):
                 command = [command]
@@ -605,9 +605,9 @@ class Connection(object):
             self.disconnect()
             raise
 
-    def send_command(self, *args):
+    async def send_command(self, *args):
         "Pack and send a command to the Redis server"
-        self.send_packed_command(self.pack_command(*args))
+        await self.send_packed_command(self.pack_command(*args))
 
     def can_read(self, timeout=0):
         "Poll the socket to see if there's data that can be read."
@@ -980,24 +980,24 @@ class ConnectionPool(object):
                     return
                 self.reset()
 
-    def get_connection(self, command_name, *keys, **options):
+    async def get_connection(self, command_name, *keys, **options):
         "Get a connection from the pool"
         self._checkpid()
         try:
             connection = self._available_connections.pop()
         except IndexError:
-            connection = self.make_connection()
+            connection = await self.make_connection()
         self._in_use_connections.add(connection)
         try:
             # ensure this connection is connected to Redis
-            connection.connect()
+            await connection.connect()
             # connections that the pool provides should be ready to send
             # a command. if not, the connection was either returned to the
             # pool before all data has been read or the socket has been
             # closed. either way, reconnect and verify everything is good.
             if not connection.is_ready_for_command():
-                connection.disconnect()
-                connection.connect()
+                await connection.disconnect()
+                await connection.connect()
                 if not connection.is_ready_for_command():
                     raise ConnectionError('Connection not ready')
         except:  # noqa: E722
@@ -1016,14 +1016,14 @@ class ConnectionPool(object):
             decode_responses=kwargs.get('decode_responses', False)
         )
 
-    def make_connection(self):
+    async def make_connection(self):
         "Create a new connection"
         if self._created_connections >= self.max_connections:
             raise ConnectionError("Too many connections")
         self._created_connections += 1
         return self.connection_class(**self.connection_kwargs)
 
-    def release(self, connection):
+    async def release(self, connection):
         "Releases the connection back to the pool"
         self._checkpid()
         if connection.pid != self.pid:
@@ -1031,7 +1031,7 @@ class ConnectionPool(object):
         self._in_use_connections.remove(connection)
         self._available_connections.append(connection)
 
-    def disconnect(self):
+    async def disconnect(self):
         "Disconnects all connections in the pool"
         self._checkpid()
         all_conns = chain(self._available_connections,

@@ -765,28 +765,28 @@ class Redis(object):
         return PubSub(self.connection_pool, **kwargs)
 
     # COMMAND EXECUTION AND PROTOCOL PARSING
-    def execute_command(self, *args, **options):
+    async def execute_command(self, *args, **options):
         "Execute a command and return a parsed response"
         pool = self.connection_pool
         command_name = args[0]
-        connection = pool.get_connection(command_name, **options)
+        connection = await pool.get_connection(command_name, **options)
         try:
-            connection.send_command(*args)
-            return self.parse_response(connection, command_name, **options)
+            await connection.send_command(*args)
+            return await self.parse_response(connection, command_name, **options)
         except (ConnectionError, TimeoutError) as e:
-            connection.disconnect()
+            await connection.disconnect()
             if not (connection.retry_on_timeout and
                     isinstance(e, TimeoutError)):
                 raise
-            connection.send_command(*args)
-            return self.parse_response(connection, command_name, **options)
+            await connection.send_command(*args)
+            return await self.parse_response(connection, command_name, **options)
         finally:
-            pool.release(connection)
+            await pool.release(connection)
 
-    def parse_response(self, connection, command_name, **options):
+    async def parse_response(self, connection, command_name, **options):
         "Parses a response from the Redis server"
         try:
-            response = connection.read_response()
+            response = await connection.read_response()
         except ResponseError:
             if EMPTY_RESPONSE in options:
                 return options[EMPTY_RESPONSE]
@@ -1418,7 +1418,7 @@ class Redis(object):
             params.append('REPLACE')
         return self.execute_command('RESTORE', *params)
 
-    def set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    async def set(self, name, value, ex=None, px=None, nx=False, xx=False):
         """
         Set the value at key ``name`` to ``value``
 
@@ -1448,7 +1448,7 @@ class Redis(object):
             pieces.append('NX')
         if xx:
             pieces.append('XX')
-        return self.execute_command('SET', *pieces)
+        return await self.execute_command('SET', *pieces)
 
     def __setitem__(self, name, value):
         self.set(name, value)
